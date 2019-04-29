@@ -1,0 +1,295 @@
+---
+title: "Machine Learning (Regression)"
+author: "Matt Korzec"
+date: "April 29, 2019"
+output: html_document
+---
+
+``` {r setup, include = FALSE}
+library(tidyverse)
+library(lubridate)
+library(readxl)
+library(xlsx)
+library(ggcorrplot)
+library(GGally)
+library(naniar)
+```
+
+### We are going to be using linear regression as a part of Machine Learnign exercise to come up with multiple regression models to forecast electricy load
+
+**Our dataset contains over 85,000 rows of data** 
+
+* First, let's explore our data
+
+``` {r import, include = FALSE}
+setwd("C:/Users/mkorzec/Downloads")
+
+data <- read_csv('load_weather.csv')
+
+cal <- read_csv('Calendar.csv')
+```
+
+* We have two data sets
+One with recorded values
+One with calendar values
+
+``` {r datasets}
+head(data)
+head(cal)
+```
+
+Let's match the dates from one table with the holiday and weekday values from the other table
+
+``` {r join tables}
+data2 <- data %>%
+  mutate(Month = as.double(Month),
+         Day = as.double(Day),
+         Hour = as.double(Hour))
+
+d2 <- data2 %>%
+  mutate(Date = make_datetime(Year, Month, Day, Hour))
+
+c2 <- cal %>%
+  mutate(Date = make_date(Year, Month, Day))
+
+# Separate Date and Time into two columns
+d3 <- d2 %>%
+  separate(Date, into = c("Date", "Time"), sep = " ") %>%
+  mutate(Date = as_date(Date))
+
+# Join the calendar data with main data
+x <- right_join(d3, c2, by = "Date")
+```
+
+Let's clean up the data and get rid of holidays:
+``` {r dataset clean-up}
+clean <- x %>%
+  filter(!is.na(Year.x)) %>%
+  select(Year.x, Month.x, Day.x, Hour, Load, Temperature, 
+         DewPoint, WindSpeed, CloudCover, SolarRadiation, RainFall,
+         Weekday, Holiday) %>%
+  rename(Year = Year.x,
+         Month = Month.x,
+         Day = Day.x) %>%
+  filter(Holiday == 0)
+
+head(clean, n = 10)
+```
+
+Next, check for any missing values:
+``` {r check for missing values}
+vis_miss(clean, warn_large_data = FALSE)
+```
+
+There are no missing values in our dataset
+
+Next, check the distribution of load 
+
+``` {r Check distribution, message = FALSE, warning = FALSE}
+ggplot(clean, aes(x = Load)) +
+  geom_histogram(aes(y = ..density..),
+                 color = 'black', fill = 'white') +
+  geom_density(alpha = .2, fill = '#FF6666') +
+  labs(title = "Distribution of Load")
+```
+
+* Deviate from normal
+* Positively Skewed
+* Needs Transformation
+
+Check the correlation between all variables
+```{r correlation, message = FALSE, warning = FALSE}
+corr <- round(cor(clean), 2)
+
+ggcorrplot(corr, type = 'lower', lab = TRUE) +
+  labs(title = 'Correlation between variables')
+```
+
+Next, visualize the relationships between time variables and laod
+``` {r boxplots}
+cl <- clean %>%
+  mutate(Month = factor(Month),
+         Weekday = factor(Weekday))
+
+g <- ggplot(cl, aes(x = Month, y = Load, fill = Month))
+
+g + geom_boxplot() +
+  scale_fill_brewer(palette = 'Set3') +
+  labs(title = 'Load during different months', x = 'Month', y = 'Load (MW)')
+
+h <- ggplot(cl, aes(x = Weekday, y = Load, fill = Weekday))
+
+h + geom_boxplot() +
+  scale_fill_brewer(palette = 'Set2') +
+  labs(title = 'Load during different days of the week', x = 'Day of the Week', y = 'Load (MW)')
+```
+
+Visualize mean Load over 24 hours for every month and for every day fo the week.
+``` {r lineplots}
+mean_data <- cl %>%
+  group_by(Month, Hour) %>%
+  summarise(mean_load = mean(Load))
+
+mean_plot <- ggplot(mean_data, aes(x = Hour, y = mean_load, group = Month))
+
+mean_plot + geom_line(aes(color = Month), size = 1.3) +
+  theme(legend.position = 'top') +
+  scale_color_brewer(palette = 'Paired') +
+  geom_point(aes(color = Month)) +
+  labs(title = 'Mean Hourly load for every month', x = 'Hour', y = 'Mean Load (MW)')
+
+mean_week <- cl %>%
+  group_by(Weekday, Hour) %>%
+  summarise(mean_load = mean(Load))
+
+mean_plot2 <- ggplot(mean_week, aes(x = Hour, y = mean_load, group = Weekday))
+
+mean_plot2 + geom_line(aes(color = Weekday), size = 1) +
+  theme(legend.position = 'top') +
+  scale_color_brewer(palette = 'Paired') +
+  geom_point(aes(color = Weekday)) +
+  labs(title = 'Mean Hourly Load for Every Day of the Week', x = 'Hour', y = 'Mean Load (MW)')
+```
+
+Observations:
+* Summer months have significantly higher average loads
+* Saturday and Sunday have significantly lower average loads
+* Load tends to peak around 5 P.M
+* Data needs to be divided into multiple sets
+
+Divide data into 4 seasons
+``` {r seasons}
+spring <- cl %>%
+  filter(Month == 3 | Month == 4 | Month == 5)
+
+summer <- cl %>%
+  filter(Month == 6 | Month == 7 | Month == 8)
+
+fall <- cl %>%
+  filter(Month == 9 | Month == 10 | Month == 11)
+
+winter <- cl %>%
+  filter(Month == 12 | Month == 1 | Month == 2)
+```
+
+Check the distribution of summer season load
+``` {r summer load, message = FALSE, warning = FALSE}
+ggplot(summer, aes(x = Load)) +
+  geom_histogram(aes(y = ..density..),
+                 color = 'black', fill = 'white') +
+  geom_density(alpha = .2, fill = '#FF6666')
+```
+
+Still far from normal distribution
+
+Divide the summer data into weekend and weekday datasets
+
+``` {r weekdays and weekends}
+summer_weekdays <- summer %>%
+  filter(Weekday != 0 & Weekday != 6)
+
+summer_weekends <- summer %>%
+  filter(Weekday == 0 | Weekday == 6)
+```
+
+Let's grab Summer weekday data for Hour = 1 and check its distribution
+``` {r hour 1, message = FALSE, warning = FALSE}
+Summer_weekday_1 <- summer_weekdays %>%
+  filter(Hour == 1)
+
+ggplot(Summer_weekday_1, aes(x = Load)) +
+  geom_histogram(aes(y = ..density..),
+                 color = 'black', fill = 'white') +
+  geom_density(alpha = .2, fill = '#FF6666')
+```
+
+The data looks more or less like normal distribution
+
+However, we can transform it even more with log transformation
+``` {r log transformation, message = FALSE, warning = FALSE}
+Summer_weekday_1$log_load <- log(Summer_weekday_1$Load)
+
+ggplot(Summer_weekday_1, aes(x = log_load)) +
+  geom_histogram(aes(y = ..density..),
+                 color = 'black', fill = 'white') +
+  geom_density(alpha = .2, fill = '#FF6666')
+```
+
+Now, we have a normal distribution and data ready to use for a regression mdoel
+
+Split the data into training and testing datasets. We are using 70% of data to train and the rest to test.
+``` {r test and train}
+
+split_size = 0.7
+
+sample_size = floor(split_size * nrow(Summer_weekday_1))
+
+train_indices <- sample(seq_len(nrow(Summer_weekday_1)), size = sample_size)
+
+train <- Summer_weekday_1[train_indices, ]
+test <- Summer_weekday_1[-train_indices, ]
+```
+
+Now, we are going to use stepwise selection to pick the best fitting model
+``` {r stepwise, results = 'hide'}
+test_model <- lm(Load ~ Temperature + DewPoint + WindSpeed + CloudCover + SolarRadiation + RainFall + factor(Weekday),
+                 data = train)
+
+selected <- step(test_model)
+```
+
+Here's the best fitting modell for Summer, during the week at 1 A.M [BEFORE LOG TRANFORMATION]
+``` {r selected}
+selected
+```
+
+Let's do the same for the transformed data
+``` {r stepwise transformed, results = 'hide'}
+test_log_model <- lm(log_load ~ Temperature + DewPoint + WindSpeed + CloudCover + SolarRadiation + RainFall + factor(Weekday),
+                 data = train)
+
+log_selected <- step(test_log_model)
+```
+
+Here's the selected model for log transformed data
+``` {r log_seelcted}
+log_selected
+```
+
+Examine both models
+Initial:
+``` {r initial}
+summary(selected)
+```
+Transformed:
+``` {r transformed}
+summary(log_selected)
+```
+
+Let's calculate RMSE for both models:
+
+Initial model:
+``` {r RMSE}
+model1 <- lm(Load ~ Temperature + CloudCover + factor(Weekday), data = train)
+
+new1 <- data.frame(Temperature = test$Temperature, CloudCover = test$CloudCover, Weekday = test$Weekday)
+
+test$output1 <- predict(model1, new1)
+
+sqrt(sum(test$Load - test$output1)^2/nrow(test))
+```
+
+Transformed Model:
+``` {r RMSE 2}
+model2 <- lm(log_load ~ Temperature + DewPoint + CloudCover + factor(Weekday), data = train)
+
+new2 <- data.frame(Temperature = test$Temperature, DewPoint = test$DewPoint,CloudCover = test$CloudCover, Weekday = test$Weekday)
+
+test$output2 <- predict(model2, new2)
+
+sqrt(sum(test$Load - test$output2)^2/nrow(test))
+```
+
+## This is just a small sample of a project using Machine Learning with Regression
+
+# The models are not final, this is just for reference purposes
